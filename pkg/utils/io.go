@@ -3,9 +3,13 @@ package utils
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
+
+	"golang.org/x/exp/constraints"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -17,16 +21,16 @@ type readerFunc func(p []byte) (n int, err error)
 func (rf readerFunc) Read(p []byte) (n int, err error) { return rf(p) }
 
 // CopyWithCtx slightly modified function signature:
-// - context has been added in order to propagate cancelation
+// - context has been added in order to propagate cancellation
 // - I do not return the number of bytes written, has it is not useful in my use case
-func CopyWithCtx(ctx context.Context, out io.Writer, in io.Reader, size int64, progress func(percentage int)) error {
+func CopyWithCtx(ctx context.Context, out io.Writer, in io.Reader, size int64, progress func(percentage float64)) error {
 	// Copy will call the Reader and Writer interface multiple time, in order
 	// to copy by chunk (avoiding loading the whole file in memory).
 	// I insert the ability to cancel before read time as it is the earliest
 	// possible in the call process.
 	var finish int64 = 0
 	s := size / 100
-	_, err := io.Copy(out, readerFunc(func(p []byte) (int, error) {
+	_, err := CopyWithBuffer(out, readerFunc(func(p []byte) (int, error) {
 		// golang non-blocking channel: https://gobyexample.com/non-blocking-channel-operations
 		select {
 		// if context has been canceled
@@ -38,7 +42,7 @@ func CopyWithCtx(ctx context.Context, out io.Writer, in io.Reader, size int64, p
 			n, err := in.Read(p)
 			if s > 0 && (err == nil || err == io.EOF) {
 				finish += int64(n)
-				progress(int(finish / s))
+				progress(float64(finish) / float64(s))
 			}
 			return n, err
 		}
@@ -132,19 +136,9 @@ func (mr *MultiReadable) Close() error {
 	return nil
 }
 
-type nopCloser struct {
-	io.ReadSeeker
-}
-
-func (nopCloser) Close() error { return nil }
-
-func ReadSeekerNopCloser(r io.ReadSeeker) io.ReadSeekCloser {
-	return nopCloser{r}
-}
-
 func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
 	for i := 0; i < attempts; i++ {
-		fmt.Println("This is attempt number", i)
+		//fmt.Println("This is attempt number", i)
 		if i > 0 {
 			log.Println("retrying after error:", err)
 			time.Sleep(sleep)
@@ -158,23 +152,84 @@ func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
 	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
 }
 
-type Closers struct {
-	closers []*io.Closer
+type ClosersIF interface {
+	io.Closer
+	Add(closer io.Closer)
+	AddClosers(closers Closers)
+	GetClosers() Closers
 }
 
-func (c *Closers) Close() (err error) {
+type Closers struct {
+	closers []io.Closer
+}
+
+func (c *Closers) GetClosers() Closers {
+	return *c
+}
+
+var _ ClosersIF = (*Closers)(nil)
+
+func (c *Closers) Close() error {
+	var errs []error
 	for _, closer := range c.closers {
 		if closer != nil {
-			_ = (*closer).Close()
+			errs = append(errs, closer.Close())
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 func (c *Closers) Add(closer io.Closer) {
-	if closer != nil {
-		c.closers = append(c.closers, &closer)
-	}
+	c.closers = append(c.closers, closer)
+
 }
-func NewClosers() *Closers {
-	return &Closers{[]*io.Closer{}}
+func (c *Closers) AddClosers(closers Closers) {
+	c.closers = append(c.closers, closers.closers...)
+}
+
+func EmptyClosers() Closers {
+	return Closers{[]io.Closer{}}
+}
+func NewClosers(c ...io.Closer) Closers {
+	return Closers{c}
+}
+
+func Min[T constraints.Ordered](a, b T) T {
+	if a < b {
+		return a
+	}
+	return b
+}
+func Max[T constraints.Ordered](a, b T) T {
+	if a < b {
+		return b
+	}
+	return a
+}
+
+var IoBuffPool = &sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024*2) // Two times of size in io package
+	},
+}
+
+func CopyWithBuffer(dst io.Writer, src io.Reader) (written int64, err error) {
+	buff := IoBuffPool.Get().([]byte)
+	defer IoBuffPool.Put(buff)
+	written, err = io.CopyBuffer(dst, src, buff)
+	if err != nil {
+		return
+	}
+	return written, nil
+}
+
+func CopyWithBufferN(dst io.Writer, src io.Reader, n int64) (written int64, err error) {
+	written, err = CopyWithBuffer(dst, io.LimitReader(src, n))
+	if written == n {
+		return n, nil
+	}
+	if written < n && err == nil {
+		// src stopped early; must have been EOF.
+		err = io.EOF
+	}
+	return
 }

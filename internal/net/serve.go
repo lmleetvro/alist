@@ -1,6 +1,8 @@
 package net
 
 import (
+	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"mime"
@@ -85,9 +87,9 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 	sendSize := size
 	var sendContent io.ReadCloser
 	ranges, err := http_range.ParseRange(rangeReq, size)
-	switch err {
-	case nil:
-	case http_range.ErrNoOverlap:
+	switch {
+	case err == nil:
+	case errors.Is(err, http_range.ErrNoOverlap):
 		if size == 0 {
 			// Some clients add a Range header to all requests to
 			// limit the size of the response. If the file is empty,
@@ -103,14 +105,14 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 		return
 	}
 
-	if sumRangesSize(ranges) > size || size < 0 {
+	if sumRangesSize(ranges) > size {
 		// The total number of bytes in all the ranges is larger than the size of the file
 		// or unknown file size, ignore the range request.
 		ranges = nil
 	}
 	switch {
 	case len(ranges) == 0:
-		reader, err := RangeReaderFunc(http_range.Range{Length: -1})
+		reader, err := RangeReaderFunc(context.Background(), http_range.Range{Length: -1})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -129,7 +131,7 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 		// does not request multiple parts might not support
 		// multipart responses."
 		ra := ranges[0]
-		sendContent, err = RangeReaderFunc(ra)
+		sendContent, err = RangeReaderFunc(context.Background(), ra)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
 			return
@@ -156,12 +158,12 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 					pw.CloseWithError(err)
 					return
 				}
-				reader, err := RangeReaderFunc(ra)
+				reader, err := RangeReaderFunc(context.Background(), ra)
 				if err != nil {
 					pw.CloseWithError(err)
 					return
 				}
-				if _, err := io.CopyN(part, reader, ra.Length); err != nil {
+				if _, err := utils.CopyWithBufferN(part, reader, ra.Length); err != nil {
 					pw.CloseWithError(err)
 					return
 				}
@@ -172,6 +174,7 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 			pw.Close()
 		}()
 	}
+	//defer sendContent.Close()
 
 	w.Header().Set("Accept-Ranges", "bytes")
 	if w.Header().Get("Content-Encoding") == "" {
@@ -181,7 +184,7 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 	w.WriteHeader(code)
 
 	if r.Method != "HEAD" {
-		written, err := io.CopyN(w, sendContent, sendSize)
+		written, err := utils.CopyWithBufferN(w, sendContent, sendSize)
 		if err != nil {
 			log.Warnf("ServeHttp error. err: %s ", err)
 			if written != sendSize {
@@ -190,7 +193,6 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
-	//defer sendContent.Close()
 }
 func ProcessHeader(origin, override http.Header) http.Header {
 	result := http.Header{}
@@ -209,29 +211,36 @@ func ProcessHeader(origin, override http.Header) http.Header {
 }
 
 // RequestHttp deal with Header properly then send the request
-func RequestHttp(httpMethod string, headerOverride http.Header, URL string) (*http.Response, error) {
-	req, err := http.NewRequest(httpMethod, URL, nil)
+func RequestHttp(ctx context.Context, httpMethod string, headerOverride http.Header, URL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, httpMethod, URL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header = headerOverride
-	log.Debugln("request Header: ", req.Header)
-	log.Debugln("request URL: ", URL)
 	res, err := HttpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("response status: %d", res.StatusCode)
-	log.Debugln("response Header: ", res.Header)
 	// TODO clean header with blocklist or passlist
 	res.Header.Del("set-cookie")
+	var reader io.Reader
 	if res.StatusCode >= 400 {
-		all, _ := io.ReadAll(res.Body)
+		// 根据 Content-Encoding 判断 Body 是否压缩
+		switch res.Header.Get("Content-Encoding") {
+		case "gzip":
+			// 使用gzip.NewReader解压缩
+			reader, _ = gzip.NewReader(res.Body)
+			defer reader.(*gzip.Reader).Close()
+		default:
+			// 没有Content-Encoding，直接读取
+			reader = res.Body
+		}
+		all, _ := io.ReadAll(reader)
+		_ = res.Body.Close()
 		msg := string(all)
 		log.Debugln(msg)
-		return res, errors.New(msg)
+		return nil, fmt.Errorf("http request [%s] failure,status: %d response:%s", URL, res.StatusCode, msg)
 	}
-
 	return res, nil
 }
 

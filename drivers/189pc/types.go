@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/alist-org/alist/v3/pkg/utils"
 )
 
 // 居然有四种返回方式
@@ -141,7 +143,7 @@ type FamilyInfoListResp struct {
 type FamilyInfoResp struct {
 	Count      int    `json:"count"`
 	CreateTime string `json:"createTime"`
-	FamilyID   int    `json:"familyId"`
+	FamilyID   int64  `json:"familyId"`
 	RemarkName string `json:"remarkName"`
 	Type       int    `json:"type"`
 	UseFlag    int    `json:"useFlag"`
@@ -175,6 +177,14 @@ type Cloud189File struct {
 	// StarLabel   int64  `json:"starLabel"`
 }
 
+func (c *Cloud189File) CreateTime() time.Time {
+	return time.Time(c.CreateDate)
+}
+
+func (c *Cloud189File) GetHash() utils.HashInfo {
+	return utils.NewHashInfo(utils.MD5, c.Md5)
+}
+
 func (c *Cloud189File) GetSize() int64     { return c.Size }
 func (c *Cloud189File) GetName() string    { return c.Name }
 func (c *Cloud189File) ModTime() time.Time { return time.Time(c.LastOpTime) }
@@ -197,6 +207,14 @@ type Cloud189Folder struct {
 	// FileCata  int64 `json:"fileCata"`
 	// Rev          string `json:"rev"`
 	// StarLabel    int64  `json:"starLabel"`
+}
+
+func (c *Cloud189Folder) CreateTime() time.Time {
+	return time.Time(c.CreateDate)
+}
+
+func (c *Cloud189Folder) GetHash() utils.HashInfo {
+	return utils.HashInfo{}
 }
 
 func (c *Cloud189Folder) GetSize() int64     { return 0 }
@@ -225,7 +243,12 @@ type BatchTaskInfo struct {
 	// IsFolder 是否是文件夹，0-否，1-是
 	IsFolder int `json:"isFolder"`
 	// SrcParentId 文件所在父目录ID
-	//SrcParentId string `json:"srcParentId"`
+	SrcParentId string `json:"srcParentId,omitempty"`
+
+	/* 冲突管理 */
+	// 1 -> 跳过 2 -> 保留 3 -> 覆盖
+	DealWay    int `json:"dealWay,omitempty"`
+	IsConflict int `json:"isConflict,omitempty"`
 }
 
 /* 上传部分 */
@@ -336,6 +359,14 @@ type BatchTaskStateResp struct {
 	SuccessedFileIDList []int64 `json:"successedFileIdList"`
 	TaskID              string  `json:"taskId"`
 	TaskStatus          int     `json:"taskStatus"` //1 初始化 2 存在冲突 3 执行中，4 完成
+}
+
+type BatchTaskConflictTaskInfoResp struct {
+	SessionKey     string `json:"sessionKey"`
+	TargetFolderID int    `json:"targetFolderId"`
+	TaskID         string `json:"taskId"`
+	TaskInfos      []BatchTaskInfo
+	TaskType       int `json:"taskType"`
 }
 
 /* query 加密参数*/

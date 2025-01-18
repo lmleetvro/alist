@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/alist-org/alist/v3/drivers/base"
@@ -75,7 +74,7 @@ func (d *QuarkOrUC) Link(ctx context.Context, file model.Obj, args model.LinkArg
 			"User-Agent": []string{ua},
 		},
 		Concurrency: 2,
-		PartSize:    10 * 1024 * 1024,
+		PartSize:    10 * utils.MB,
 	}, nil
 }
 
@@ -136,16 +135,15 @@ func (d *QuarkOrUC) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
-	tempFile, err := utils.CreateTempFile(stream.GetReadCloser(), stream.GetSize())
+	tempFile, err := stream.CacheFullInTempFile()
 	if err != nil {
 		return err
 	}
 	defer func() {
 		_ = tempFile.Close()
-		_ = os.Remove(tempFile.Name())
 	}()
 	m := md5.New()
-	_, err = io.Copy(m, tempFile)
+	_, err = utils.CopyWithBuffer(m, tempFile)
 	if err != nil {
 		return err
 	}
@@ -155,7 +153,7 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 	}
 	md5Str := hex.EncodeToString(m.Sum(nil))
 	s := sha1.New()
-	_, err = io.Copy(s, tempFile)
+	_, err = utils.CopyWithBuffer(s, tempFile)
 	if err != nil {
 		return err
 	}
@@ -211,7 +209,7 @@ func (d *QuarkOrUC) Put(ctx context.Context, dstDir model.Obj, stream model.File
 		}
 		md5s = append(md5s, m)
 		partNumber++
-		up(int(100 * (total - left) / total))
+		up(100 * float64(total-left) / float64(total))
 	}
 	err = d.upCommit(pre, md5s)
 	if err != nil {

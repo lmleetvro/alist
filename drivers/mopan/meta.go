@@ -8,8 +8,9 @@ import (
 type Addition struct {
 	Phone    string `json:"phone" required:"true"`
 	Password string `json:"password" required:"true"`
+	SMSCode  string `json:"sms_code" help:"input 'send' send sms "`
 
-	RootFolderID string `json:"root_folder_id" default:"-11" required:"true" help:"be careful when using the -11 value, some operations may cause system errors"`
+	RootFolderID string `json:"root_folder_id" default:""`
 
 	CloudID string `json:"cloud_id"`
 
